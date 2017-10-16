@@ -10,7 +10,7 @@ try:
     import xml.etree.cElementTree as ET
 except ImportError:
     import xml.etree.ElementTree as ET
-# import zookeeper
+#import zookeeper
 import httplib
 import os
 import psutil
@@ -73,32 +73,67 @@ def get_zookerper_ip_and_port():
     print 'get_zookerper_ip_and_port'
     tree = ET.ElementTree(file='../conf/ds.xml')
     # for elem in tree.iter(tag='flag'):
-    zk_elem = tree.getroot()[0]
-    try:
-        zk_str = zk_elem[4].text
-        first_zk_str = zk_str
-        if zk_str.find(',') != -1:
-            first_zk_str = zk_str.split(',')[0]
-        addr = first_zk_str.split(':')[0]
-        port = first_zk_str.split(':')[1]
-        return addr, port
-    except Exception:
-        zk_str = zk_elem[3].text
-        first_zk_str = zk_str
-        if zk_str.find(',') != -1:
-            first_zk_str = zk_str.split(',')[0]
-        addr = first_zk_str.split(':')[0]
-        port = first_zk_str.split(':')[1]
-        return addr, port
+    root = tree.getroot()
+    addr = None
+    port = None
+    for zk in root.findall('flag'):
+        zk_server = zk.find('name').text
+        if zk_server == 'zk_server':
+            server = zk.find('current').text
+            print "zk_server ==========", server
+            addr = server.split(':')[0]
+            port = server.split(':')[1]
+            print 'and zk_ip=%s,---zk_port=%s' %(addr, port)
+            break
+    return addr, port
 
 def get_dir_structure():
     print "get_dir_structure starting"
-    if not os.path.exists('../upgrade-datadir-xcloud.sh'):
+    #if not os.path.exists('../upgrade-datadir-xcloud.sh'):
+     #   if not os.path.exists('../xcloud-dataversion.sh'):
+      #      return 'Old'
+    #struct = commands.getoutput("../upgrade-datadir-xcloud.sh -auto status  | awk  '/Data status: /  {print $3}'")
+    if not os.path.exists('./dir_struc'):
         return 'Old'
-    struct = commands.getoutput("../upgrade-datadir-xcloud.sh -auto status  | awk  '/Data status: /  {print $3}'")
+
+    dir_file = "dir_struc"
+    struct = 'Old'
+    with open(dir_file, 'r') as f:
+        lines = f.readlines()
+        struct = lines[0].strip()
+    print "pfmon------dir_struct", struct
     return struct
 
 def get_zknode():
+    print "get_zknode_new starting"
+    zk_node = '/XCLOUD/NODESTATE/NODELIST_FRESH'
+    xcloud_root = 'xcloud'
+    cluster_name = 'xcloud'
+    tree = ET.ElementTree(file = '../conf/ds.xml')
+    root = tree.getroot()
+    for zk in root.findall('flag'):
+        zk_xcloud = zk.find('name').text
+        if zk_xcloud == 'xcloud_root_name':
+            try:
+                xcloud_root = zk.find('current').text
+            except Exception:
+                xcloud_root = zk.find('current').text
+        if zk_xcloud == 'cluster_name':
+            try:
+                cluster_name = zk.find('current').text
+            except Exception:
+                cluster_name = zk.find('current').text
+    struct = get_dir_structure()
+    if struct == 'Old':
+        print "zk_node====",zk_node
+        return zk_node
+    else:
+        zk_pre = '/%s/%s' % (xcloud_root, cluster_name)
+        zk_node = '%s/XCLOUD/NODESTATE/NODELIST_FRESH' %(zk_pre)
+        print "zk_node====",zk_node
+        return zk_node
+
+def get_zknode_old():#old version
     print "get_zknode starting"
     zk_node = '/XCLOUD/NODESTATE/NODELIST_FRESH'
     xcloud_root = 'xcloud'
@@ -111,12 +146,12 @@ def get_zknode():
             try:
                 xcloud_root = zk.find('current').text
             except Exception:
-                xcloud_root = zk.find('default').text
+                xcloud_root = zk.find('current').text
         if zk_xcloud == 'cluster_name':
             try:
                 cluster_name = zk.find('current').text
             except Exception:
-                cluster_name = zk.find('default').text
+                cluster_name = zk.find('current').text
 
     version_tree = ET.ElementTree(file = '../version.xml')
     version_root = version_tree.getroot()
@@ -139,6 +174,16 @@ def get_zknode():
                         zk_node = '%s/XCLOUD/NODESTATE/NODELIST_FRESH' %(zk_pre)
                         print "zknode of 2.1.2===",zk_node
                         return zk_node
+                    elif int(small_num) == 3:
+                        #2.1.3
+                        struct = get_dir_structure()
+                        if 'Old' == struct:
+                            print "zknode of 2.1.3===",zk_node
+                            return zk_node
+                        zk_pre = '/%s/%s' % (xcloud_root, cluster_name)
+                        zk_node = '%s/XCLOUD/NODESTATE/NODELIST_FRESH' %(zk_pre)
+                        print "zknode of 2.1.3latest===",zk_node
+                        return zk_node
                     elif int(small_num) == 1:
                         zk_node = '/XCLOUD/NODESTATE/NODELIST_FRESH'
                         print "zknode of 2.1.1===",zk_node
@@ -149,7 +194,7 @@ def get_zknode():
                     #2.2以上版本（包含2.2）
                     struct = get_dir_structure()
                     if 'Old' == struct:
-                        print "zknode of 2.1.2===",zk_node
+                        print "zknode of 2.2==",zk_node
                         return zk_node
                     zk_pre = '/%s/%s' % (xcloud_root, cluster_name)
                     zk_node = '%s/XCLOUD/NODESTATE/NODELIST_FRESH' %(zk_pre)
@@ -158,8 +203,10 @@ def get_zknode():
             else:
                 #trunk version
                 struct = get_dir_structure()
-                if 'Old' == struct:
-                    print "zknode of 2.1.2===",zk_node
+                print "version_trunk_dir-----",struct
+                if struct=='Old':
+                    zk_node = '/XCLOUD/NODESTATE/NODELIST_FRESH'
+                    print "zknode of trunk==",zk_node
                     return zk_node
 
                 zk_pre = '/%s/%s' % (xcloud_root, cluster_name)
@@ -167,7 +214,6 @@ def get_zknode():
                 print "zknode of trunk======",zk_node
                 return zk_node
 
-    return zk_node
 
 def get_active_xclouds_from_zookeeer(addr, port):
     str_connection = "%s:%s" % (addr, port)
@@ -191,18 +237,20 @@ def get_active_xclouds_from_zookeeer_kazoo(addr, port):
     return children
 
 
-def get_info_remote(addr, history, topsql):
+def get_info_remote(addr, history, topsql, sysinfo, port=None):
     try:
         print 'going to fetch data from %s' % addr
-        port = get_xcperf_port()
-        print "port===",port
+        if port is None:
+            port = get_xcperf_port()
+            print "port===",port
+        print "monitoring_port is ==========",port
         ip  = socket.gethostbyname(addr)
         print "ip=====",ip
         conn = httplib.HTTPConnection(ip, port)
         #conn = httplib.HTTPConnection(addr, port)
         global g_sysinfo
-        print 'g_sysinfo: %s' % g_sysinfo
-        if g_sysinfo == '1':
+        print 'g_sysinfo: %s' % sysinfo
+        if sysinfo == '1':
             print "before request sysinfo"
             conn.request('GET', 'index.html?sysinfo=1&expand=false')
             print "after request sysinfo"
@@ -232,7 +280,7 @@ def get_xcperf_port():
             try:
                 port = zk.find('current').text
             except Exception:
-                port = zk.find('default').text
+                port = zk.find('current').text
             return int(port) 
     #try:
         #file = open('xcperf_port', 'r');
@@ -552,7 +600,7 @@ def make_topsql_result_total(results, expand, topsql):
                 result_total += '|'
     return result_total
 
-def make_sysinfo_result_total(results):
+def make_sysinfo_result_total(results, expand):
     print 'enter func make_sysinfo_result_total'
     print 'before do anything : %s' % str(results)
     print 'end before do anything'
@@ -562,7 +610,7 @@ def make_sysinfo_result_total(results):
 
     index = 0
     result_total = ''
-    if g_expand == 'true':
+    if expand == 'true':
         result_total += '{"HOSTS":['
         for result in results:
             # print result
@@ -582,13 +630,14 @@ def make_sysinfo_result_total(results):
 title_regex = r"^\w\d{4} \d\d:\d\d:\d\d\.\d{6}.+logging\.h:88\]"   # S0217 23:18:45.558907  9105 logging.h:88]
 queryId_regex = r" query_id\[.+:?.+:?.+:0\]"   #  query_id[3e0c10ac:58a71453:848:0]
 inflight_regex = r", is_inflight\[\b(true|false)\b\]"    # , is_inflight[true]
-stmt_regex = queryId_regex + r", stmt\[.+\]" + inflight_regex   # queryId_regex + stmt[sql], is_inflight[true]
+#stmt_regex = queryId_regex + r", stmt\[.+\]" + inflight_regex   # queryId_regex + stmt[sql], is_inflight[true]
+stmt_regex = queryId_regex + r", stmt\[(\S|\s)+" + inflight_regex
 #startTime_regex = r", start_time\[\w{3} \w{3} \d\d \d\d:\d\d:\d\d \d{4}\]"   # , start_time[Fri Feb 17 23:18:43 2017]
 startTime_regex = r", start_time\[\w{3} \w{3} .. \d\d:\d\d:\d\d \d{4}\]"   # , start_time[Fri Feb 17 23:18:43 2017]
 #stopTime_regex = r", stop_time\[\w{3} \w{3} \d\d \d\d:\d\d:\d\d \d{4}\]"   # , stop_time[Fri Feb 17 23:18:43 2017]
 stopTime_regex = r", stop_time\[\w{3} \w{3} .. \d\d:\d\d:\d\d \d{4}\]"   # , stop_time[Fri Feb 17 23:18:43 2017]
 runTime_regex = r", run_time\[\d+\(ms\)\]"    # , run_time[2283(ms)]
-end_regex = r"\. Query Used Time Total \[[\w.]+\]\. ?\b(success|failed)\b\.\(code=\d+\.\)$"   # . Query Used Time Total [2s304ms].success.(code=9.)
+end_regex = r"\. Query Used Time Total \[[\w.]+\]\. ?\b(success|failed)\b\.\(code=\d+\..+$"   # . Query Used Time Total [2s304ms].success.(code=9.)
 standard_regex = title_regex + stmt_regex + startTime_regex + stopTime_regex + runTime_regex + end_regex
 
 class ParserSQL():
@@ -620,9 +669,11 @@ class ParserSQL():
         print "self._fileList====",self._fileList
         self.initReCompile()
         self.findSql()
-        if len(self._sqls) == self._count+1:
-            self._sqls = self._sqls[:-1]
+        #if len(self._sqls) == self._count+1:
+         #   self._sqls = self._sqls[:-1]
         self._sqls.sort(lambda a,b:int(b['runTime'])-int(a['runTime']))   # 降序
+        if len(self._sqls) == self._count+1:#改成先降序再取出N条sql
+            self._sqls = self._sqls[:-1]
         name = socket.getfqdn(socket.gethostname())
         addr = socket.gethostbyname(name)
         rank = 1
@@ -688,11 +739,28 @@ class ParserSQL():
     '''
     def findSql(self):
         for oneFile in self._fileList:
+            lines = []
             with open(self._dir + "/" + oneFile) as f:
-                for line in f:
-                    print line
+                linet = ''
+                for line1 in f:
+                    if line1.find('\r\n') != -1:
+                        print "this line contain huiche",line1
+                        line1 = line1.replace('\r\n', ' ')
+                        linet = linet+line1
+                    else:
+                        if linet != '':
+                            linet = linet+line1
+                            print "after cut huiche ----",linet
+                            lines.append(linet)
+                            linet = ''
+                        else:
+                            lines.append(line1)
+
+                for line in lines:
+                    print "will ParserSQL....",line
                     isCorrect = self.isCorrect(line)
                     if isCorrect:
+                        print "ParserSQL line is ......",line
                         curTimeMatch = self.stopTime_pattern.search(line)
                         curTime = curTimeMatch.group()     # ', stop_time[Fri Feb 17 22:03:58 2017]'
                         curTime = curTime[12:-1]
@@ -703,6 +771,7 @@ class ParserSQL():
                             continue
                     else:
                         continue
+            del lines[:]
 
     def isCorrect(self, srcStr):
         if self.standard_pattern.search(srcStr) is not None:
@@ -777,6 +846,7 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
             self.send_response(404)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
+            print "request error.......404"
             return
         try:
             # send code 200 response
@@ -818,7 +888,7 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
             pid = get_xcloud_pid()
             print 'xcloud is running at pid: %d' % pid
             
-            if g_sysinfo == '1':
+            if l_sysinfo == '1':
                 collect_sys_cpu_mem_info(memdict, cpudict, pid)
                 result = make_result_single(memdict, cpudict)
                 result_list.append(result)
@@ -856,22 +926,71 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                 print addr
                 print port
                 # print 'get zookeeper ip, port from ds.xml: %s : %s' % addr, port
-
+                if addr == None or port == None:
+                    print "getZK port and ip error from  ds.xml"
+                    return
                 print 'fetch active xclouds from zookeeper:'
                 active_nodes = get_active_xclouds_from_zookeeer_kazoo(addr, port)
                 print active_nodes
 
-                host_name = socket.gethostname()
+                host_name = socket.gethostname()   # eg.  host_name:xcloud9
                 host_fqdn = socket.getfqdn(socket.gethostname())
                 host_ip = socket.gethostbyname(host_fqdn)
                 print "result_list===",result_list
                 print 'host_name: %s:%s' % (host_name, host_ip)
+                zk = KazooClient(hosts='%s:%s' % (addr, port))
+                if not zk.connected:
+                    zk.start()
+                zk_node = get_zknode()
+
                 for node in active_nodes:
-                    print "node====",node
-                    if node == host_name:
-                        continue
+                    if zk.connected:
+                        print "zk connected success"
+                    child_dir = zk_node+'/'+node
+                    datas = zk.get(child_dir)
+                    print "monitoring_port======",datas
+                    monitor_port = 0
+                    for data in datas:
+                        print "get monitor_port by split data",data
+                        try:
+                            d = json.loads(data)
+                            print "dddddddd",d
+                            monitor_port = d.get("monitor_port")
+                            print "get monitor_port from zk===",monitor_port
+                            if monitor_port != 0:
+                                break
+                        except Exception:
+                            continue
+
+                    print "node_split_before====",node    #eg.  node: xcloud9_17389   
+                    if node.find('_') != -1: 
+                        s_node = node.split('_')
+                        node = s_node[0]
+                        print "node_split_after===", node  #eg.  node:xcloud9
+                    if None == monitor_port or 0 == monitor_port:
+                        #continue
+                        if node == host_name:
+                            continue
+                        else:
+                            str_result = get_info_remote(node, l_history, l_sysinfo, l_topsql)
+                            print "str_result ==== ",str_result
+                            if l_sysinfo == '1':
+                                result_list.append(str_result)
+                            if l_topsql != '0':
+                                if '' == str_result:
+                                    continue
+                                for result in str_result.split('|'):
+                                    result_list.append(eval(result))
                     else:
-                        str_result = get_info_remote(node, l_history, l_topsql)
+                        if get_xcperf_port() == monitor_port and node == host_name:
+                            continue
+                        if l_sysinfo == '1' and node == host_name:
+                            continue
+                        str_result = ''
+                        if monitor_port == None or 0 == monitor_port:
+                            str_result = get_info_remote(node, l_history, l_sysinfo, l_topsql)
+                        else:
+                            str_result = get_info_remote(node, l_history, l_topsql, l_sysinfo, monitor_port)
                         print "str_result ==== ",str_result
                         #if g_sysinfo == '1':
                         if l_sysinfo == '1':
@@ -882,11 +1001,11 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                                 continue
                             for result in str_result.split('|'):
                                 result_list.append(eval(result))
-
+                zk.stop()
             #if g_sysinfo == '1':
             if l_sysinfo == '1':
-                data = make_sysinfo_result_total(result_list)
-                print data
+                data = make_sysinfo_result_total(result_list, l_expand)
+                print "sysinfo======",data
                 print "sysinfo===1"
                 self.wfile.write(data)
 
@@ -932,7 +1051,7 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                            # g_mutex_lock.release()
                             return
                        # g_mutex_lock.release()
-
+                print "l_hwho===",l_hwho
                 data = None
                 spaceUsage = space_admin.SpaceUsage()
                 ret, res = spaceUsage.get_xcloud_info_from_dhfs()
@@ -1021,7 +1140,7 @@ def requesthdfs(request):
         g_hdfs_info = rsp.read()
 
         print "g_hdfs_info =====",g_hdfs_info
-        sleep(180)
+        sleep(7200)
 
 def requesttopsql(request):
     global g_topsql_requested
@@ -1042,19 +1161,28 @@ def requesttopsql(request):
         g_topsql_info = rsp.read()
 
         print "g_topsql_info===",g_topsql_info
-        sleep(60)
+        sleep(600)
+        redirectpfmonlog()
+
+def redirectpfmonlog():
+    filePath = '../log/pfmon.log'
+    if os.path.exists(filePath):
+	    if os.path.getsize(filePath)/1024/1024 > 1000:
+	        os.system('>../log/pfmon.log')
 
 if __name__ == '__main__':
     threads = []
-    t1 = threading.Thread(target=run)
-    threads.append(t1)
+    #t1 = threading.Thread(target=run)
+    #threads.append(t1)
     t2 = threading.Thread(target=requesthdfs,args={'requesthd',})
     threads.append(t2)
     t3 = threading.Thread(target=requesttopsql,args={'requesttopsql',})
     threads.append(t3)
+    #t4 = threading.Thread(target=redirectpfmonlog)
+    #threads.append(t4)
 
     for t in threads:
         t.setDaemon(True)
         t.start()
-    while 1:
-        pass
+    run()
+    pass

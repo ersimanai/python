@@ -27,31 +27,42 @@ class SpaceUsage():
                 try:
                     xcloud_ns = zk.find('current').text
                 except Exception:
-                    xcloud_ns = zk.find('default').text
+                    xcloud_ns = zk.find('current').text
             if zk_xcloud == 'cluster_name':
                 try:
                     cluster_name = zk.find('current').text
                 except Exception:
-                    cluster_name = zk.find('default').text
+                    cluster_name = zk.find('current').text
 
         self.xcloud_ns = 'xcloud'
         self.cluster_name = 'xcloud'
 
-        if os.path.exists('../upgrade-datadir-xcloud.sh'):
-            struct = commands.getoutput("../upgrade-datadir-xcloud.sh -auto status  | awk  '/Data status: / {print $3}'")
-            if 'Old' != struct:
+        #if os.path.exists('../upgrade-datadir-xcloud.sh') or os.path.exists('../xcloud-dataversion.sh'):   #2.2及之后的版本
+        if os.path.exists('./dir_struc'):
+            self.cluster_name = cluster_name
+            dir_file = "dir_struc"
+            struct = 'Old'
+            with open(dir_file, 'r') as f:
+                struct = f.readlines()[0].strip()
+            if 'Old' != struct:#新的数据目录结构
                 self.xcloud_ns = xcloud_ns
                 self.cluster_name = cluster_name
+	 	self.meta_path = '/%s/%s.meta' % (self.xcloud_ns,self.cluster_name)
+                print "sel.meta_path====",self.meta_path
+		return
+            self.meta_path = '/%s/%s.meta' % (self.xcloud_ns,self.cluster_name)#旧的数据目录结构
+            print "sel.meta_path====",self.meta_path
+            return
 
-        self.meta_path = '/%s/%s.meta' % (self.xcloud_ns,self.cluster_name)
-        meta_tree = ET.ElementTree(file = '../conf/ds.xml')
+        meta_tree = ET.ElementTree(file = '../conf/ds.xml') #2.2之前的数据目录结构
         meta_root = meta_tree.getroot()
         for meta in meta_root.findall('flag'):
             name = meta.find('name').text
             if name ==  'metadata_name':
                 meta_path = meta.find('current').text
                 self.meta_path = '/%s/%s.meta' %(self.xcloud_ns,meta_path)
-        print "sel.meta_path====",self.meta_path
+                print "sel.meta_path====",self.meta_path
+
     def do_space_usage_old(self, db_name, user_name):
         db_name = db_name.upper()
         user_name = user_name.upper()

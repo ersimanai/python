@@ -2,8 +2,7 @@
 #coding: utf-8
 from  SocketServer import  ThreadingMixIn
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
-from time import ctime,sleep
-from threading import current_thread
+from time import sleep
 import threading
 import urlparse
 try:
@@ -13,16 +12,19 @@ except ImportError:
 #import zookeeper
 import httplib
 import os
+import subprocess
 import psutil
 import json
 import socket
-import datetime, time
 import re
 import commands
-import space_admin
 import collections
-import time
 from kazoo.client import KazooClient
+
+import parserSQL
+import space_admin
+import check_info
+import myUtil
 
 g_result_list = []
 
@@ -30,11 +32,12 @@ g_memtotal  = 'MemTotal'
 g_memfree   = 'MemFree'
 g_memxcloud = 'MemXcloud'
 
-g_cpuCore   = 'cpuCore'
+g_cpuCore   = 'cores'
 g_cpuUsed   = 'cpuUsed'
-g_cpuXcloud = 'cpuXcloud'
+g_cpuXcloud = 'xcloud_cpu'
 
 g_sysinfo  = '0'
+g_checkinfo  = '0'
 g_expand   = 'false'
 g_topsql   = '0'
 g_duration = ''
@@ -43,29 +46,31 @@ g_hdfs_who = 'false'
 g_topsql_who = 'false'
 g_hdfs = ''
 g_dbName   = ''
-#g_userName = ''
 g_topsql_info = ''
 g_topsql_requested = '0'
 g_hdfs_info = ''
 g_hdfs_requested = '0'
 g_mutex_lock = threading.Lock()
+g_sys_info = ''
 def server_unavailable_str(addr):
-    print addr
     try:
-        host_fqdn = socket.getfqdn(addr)    
-        print host_fqdn
+        host_fqdn = socket.getfqdn(addr)
         host_ip = socket.gethostbyname(host_fqdn)
-        print host_ip
     except Exception, e:
         print Exception,":", e
         print "the /etc/host/  has no host :%s",addr
         host_ip = "None"
+        '''
     result = '{' \
-             '"host":"%s:%s",' \
+            '"host":"%s:%s",' \
+            '"monitor_port":"%s",' \
+            '"xcloud_pid":"%s",' \
              '"monitor_status":"off",' \
              '"cpu":{"cores":"N/A","xcloud_cpu":"N/A","cpuUsed":"N/A"},' \
              '"memory":{"MemTotal":"N/A","MemFree":"N/A","MemXcloud":"N/A"' \
-             '}}' % (addr, host_ip)
+             e}}' % (addr, host_ip,host_monitor,xcloud_pid)
+             '''
+    result = ""
     print "server_unavailable_str===result=====",result
     return result
 
@@ -74,18 +79,18 @@ def get_zookerper_ip_and_port():
     tree = ET.ElementTree(file='../conf/ds.xml')
     # for elem in tree.iter(tag='flag'):
     root = tree.getroot()
-    addr = None
-    port = None
+    servers = None
     for zk in root.findall('flag'):
         zk_server = zk.find('name').text
         if zk_server == 'zk_server':
-            server = zk.find('current').text
-            print "zk_server ==========", server
-            addr = server.split(':')[0]
-            port = server.split(':')[1]
-            print 'and zk_ip=%s,---zk_port=%s' %(addr, port)
+            servers = zk.find('current').text
+            #server = server.split(':')
+            #addr = server[0]
+            #port = server[1]
+            #print 'and zk_ip=%s,---zk_port=%s' %(addr, port)
+            return servers
             break
-    return addr, port
+    return servers
 
 def get_dir_structure():
     print "get_dir_structure starting"
@@ -100,11 +105,13 @@ def get_dir_structure():
     struct = 'Old'
     with open(dir_file, 'r') as f:
         lines = f.readlines()
+        if lines == '':
+            return  'Old'
         struct = lines[0].strip()
     print "pfmon------dir_struct", struct
     return struct
 
-def get_zknode():
+def get_zknode(servers=None):
     print "get_zknode_new starting"
     zk_node = '/XCLOUD/NODESTATE/NODELIST_FRESH'
     xcloud_root = 'xcloud'
@@ -125,13 +132,35 @@ def get_zknode():
                 cluster_name = zk.find('current').text
     struct = get_dir_structure()
     if struct == 'Old':
-        print "zk_node====",zk_node
-        return zk_node
+        zk_nodes = collections.OrderedDict()
+        zk_nodes['xcloud'] = zk_node
+        return zk_nodes
     else:
+        zk_nodes = collections.OrderedDict()
         zk_pre = '/%s/%s' % (xcloud_root, cluster_name)
         zk_node = '%s/XCLOUD/NODESTATE/NODELIST_FRESH' %(zk_pre)
-        print "zk_node====",zk_node
-        return zk_node
+        if servers != None:#topN 要返回所有进程组的znode
+            zk = KazooClient(hosts='%s' %(servers))
+            try:
+                zk.start()
+                zk_root_name = '/%s' %(xcloud_root)
+                zk_clusters_name = zk.get_children(zk_root_name)
+                for zk_cluster_name in zk_clusters_name:
+                    z_pre = '/%s/%s' % (xcloud_root, zk_cluster_name)
+                    print "get_zknode:z_pre===",z_pre
+                    z_node = '%s/XCLOUD/NODESTATE/NODELIST_FRESH' %(z_pre)
+                    print "get_zknode: znode===",z_node
+                    zk_nodes[z_pre] = z_node
+                zk.stop()
+            except Exception as e: 
+                print "get_zknode Exception is:",e 
+                zk.stop()
+                zk_nodes[zk_pre] = zk_node
+            print "zk_nodes:", zk_nodes
+            return zk_nodes
+        zk_nodes[zk_pre] = zk_node
+        print "zk_node====",zk_nodes
+        return zk_nodes
 
 def get_zknode_old():#old version
     print "get_zknode starting"
@@ -224,85 +253,97 @@ def get_active_xclouds_from_zookeeer(addr, port):
     #return zookeeper.get_children(zk, "/XCLOUD/NODESTATE/NODELIST_FRESH", None)
     return zookeeper.get_children(zk, zk_node, None)
 
-def get_active_xclouds_from_zookeeer_kazoo(addr, port):
-    str_connection = 'hosts=%s:%s' % (addr, port)
-    print "str_connection: %s" % str_connection
-    zk = KazooClient(hosts='%s:%s' % (addr, port))
-    zk.start()
-    zk_node = get_zknode()
-    print "zk_node====",zk_node
-    #children = zk.get_children("/XCLOUD/NODESTATE/NODELIST_FRESH")
-    children = zk.get_children(zk_node)
-    zk.stop()
-    return children
+def get_active_xcloudinfo_from_zookeer(servers,topsql = '0'):
+    zk_nodes = get_zknode()
+    if topsql != '0':
+        zk_nodes = get_zknode(servers)
+    result = collections.OrderedDict()
+    count = 0
+    str_connection = 'hosts=%s' % (servers)
+    zk = KazooClient(hosts='%s' %(servers))
+    try:
+        zk.start()
+        for zk_name in zk_nodes:
+            zk_node = zk_nodes[zk_name]
+            children = zk.get_children(zk_node)
+            for child in children:
+                child_dir = zk_node + "/" + child
+                datas = zk.get(child_dir)
+                monitor_port = 0
+                for data in datas:
+                    try:
+                        d = json.loads(data)
+                        monitor_port = d.get("monitor_port")
+                    except Exception as e:
+                        print 'get_monitor_port from zk  except=%s,monitor_port=%s' %(e,monitor_port)
+                if None == monitor_port or 0 == int(monitor_port):
+                    monitor_port = myUtil.get_xcperf_port()
+                    result[child] = monitor_port
+                else:
+                    result[child] = monitor_port
+                count = count + 1 
+        if zk.connected:
+            zk.stop()
+    except Exception as e:
+        print "get_active_xcloudinfo_from_zookeer error:",e
+        if zk.connected:
+            zk.stop()
+            print "get_active_xcloudinfo_from_zookeer exception and zk.stop"
+
+    return result, count
 
 
-def get_info_remote(addr, history, topsql, sysinfo, port=None):
+#获取节点的信息，eg  monitoring_port，session_port等
+#def get_active_xcloudinfo_from_zookeer_kazoo(addr, port, child_dir):
+#    str_connection = 'hosts=%s:%s' % (addr, port)
+#    zk = KazooClient(hosts='%s:%s' % (addr, port))
+#    zk.start()
+#    try:
+#        datas = zk.get(child_dir)
+#        zk.stop()
+#    except Exception:
+#        zk.stop()
+#    return datas
+
+#def get_active_xclouds_from_zookeeer_kazoo(addr, port):
+#    str_connection = 'hosts=%s:%s' % (addr, port)
+#    print "str_connection: %s" % str_connection
+#    zk = KazooClient(hosts='%s:%s' % (addr, port))
+#    zk.start()
+#    zk_node = get_zknode()
+#    print "zk_node====",zk_node
+#    #children = zk.get_children("/XCLOUD/NODESTATE/NODELIST_FRESH")
+#    children = zk.get_children(zk_node)
+#    zk.stop()
+#    return children
+
+
+def get_info_remote(addr, history, topsql, sysinfo, checkinfo, port=None):
     try:
         print 'going to fetch data from %s' % addr
         if port is None:
-            port = get_xcperf_port()
-            print "port===",port
-        print "monitoring_port is ==========",port
+            port = myUtil.get_xcperf_port()
         ip  = socket.gethostbyname(addr)
-        print "ip=====",ip
         conn = httplib.HTTPConnection(ip, port)
         #conn = httplib.HTTPConnection(addr, port)
-        global g_sysinfo
-        print 'g_sysinfo: %s' % sysinfo
         if sysinfo == '1':
-            print "before request sysinfo"
             conn.request('GET', 'index.html?sysinfo=1&expand=false')
-            print "after request sysinfo"
+        elif checkinfo == '1':
+            conn.request('GET', 'index.html?checkinfo=1&expand=false')
         else:
-            #print "g_topsql==%d,g_duration==%s" %(int(g_topsql), g_duration)
-            print "g_topsql==%d,g_duration==%s" %(int(topsql), history)
             #url = 'index.html?top=%d&history=%s&expand=false&who=true' % (int(g_topsql), g_duration)
             url = 'index.html?top=%d&history=%s&expand=false&who=true' % (int(topsql), history)
             conn.request('GET', url)
-            print "after requests top10"
         rsp = conn.getresponse()
-        print "rsp==============",rsp
         return rsp.read()
     except Exception, e:
         print "exception=====",Exception, ":", e
         return server_unavailable_str(addr)
 
-def get_xcperf_port():
-    print "get_monitoring_port"
-
-    tree = ET.ElementTree(file='../conf/ds.xml')
-    #zk_elem = tree.getroot()[115]
-    zk_elem = tree.getroot()
-    for zk in zk_elem.findall('flag'):
-        monitoring_port = zk.find('name').text
-        if monitoring_port == 'monitoring_port':
-            try:
-                port = zk.find('current').text
-            except Exception:
-                port = zk.find('current').text
-            return int(port) 
-    #try:
-        #file = open('xcperf_port', 'r');
-        #xcperf_port = file.read()
-        #return int(xcperf_port)
-        #port  = int(zk_elem[4].text)
-    #except Exception:
-        #return int(10011)
-        #port  = int (zk_elem[3].text)
-    return int(10011)
-
-def get_xcloud_pid():
-    # file = open('../bin/pid', 'r');
-    file = open('pid', 'r');
-    strpid = file.read()
-    print 'get_xcloud_pid ret: %s' % strpid
-    return int(strpid)
 
 def write_pid_to_file(file_path):
     file = open(file_path, 'w');
     pid = os.getpid()
-    print('pid: %s' % pid)
     file.write('%s' % pid)
     return
 
@@ -312,11 +353,10 @@ def collect_xcloud_mem_info(memdict, pid):
         process = psutil.Process(pid)
         meminfo = process.memory_info()
         # print process.memory_info()
-        print "rss: %d Byte" % (meminfo.rss)
         # assert isinstance(rss, object)
         memdict[g_memxcloud] = long(meminfo.rss / 1024)
         return
-    except Exception, e:
+    except Exception:
         memdict[g_memxcloud] = 'N/A'
 
 
@@ -332,7 +372,6 @@ def collect_sys_mem_info(memdict):
         mem[name] = long(var)
     memdict[g_memtotal] = mem[g_memtotal]
     memdict[g_memfree] = mem[g_memfree]
-    print 'mem_total: %d' % memdict[g_memtotal]
     return
 
 def collect_xcloud_cpu_info(cpudict, pid):
@@ -356,37 +395,27 @@ def collect_sys_cpu_mem_info(memdict, cpudict, pid):
     collect_xcloud_mem_info(memdict, pid)
     collect_sys_cpu_info(cpudict)
     collect_xcloud_cpu_info(cpudict, pid)
-    print 'mem_total: %d' % memdict[g_memtotal]
-    print 'mem_free: %d' % memdict[g_memfree]
-    print 'mem_xcloud: %s' % memdict[g_memxcloud]
-    print 'cpu_core: %d' % cpudict[g_cpuCore]
-    print 'cpu_used: %f' % cpudict[g_cpuUsed]
-    print 'cpu_xcloud: %s' % cpudict[g_cpuXcloud]
     # print 'sys_mem_free: ' + sys_mem_free
     return
 
 def parse_url(strurl):
     print 'enter func parse_url'
-    print strurl
     url_dict = collections.OrderedDict()
     pattern_top10_sqls  = re.compile(r'top')
     pattern_sys_info    = re.compile(r'sysinfo')
+    pattern_check_info    = re.compile(r'checkinfo')
     pattern_space_usage = re.compile(r'hdfs')
     old_pattern_space_usage = re.compile(r'/\?dbname=(\w+)&username=(\w+)')
     is_top10_sqls  = pattern_top10_sqls.search(strurl)
     is_sys_info    = pattern_sys_info.search(strurl)
+    is_check_info    = pattern_check_info.search(strurl)
     is_space_usage = pattern_space_usage.search(strurl)
     is_old_space_usage = old_pattern_space_usage.search(strurl)
 
-    print "is_top10_sqls------------",is_top10_sqls
-    print "is_sys_info--------------",is_sys_info
-    print "is_space_usage-----------",is_space_usage
-    print "is_old_space_usage-------",is_old_space_usage
 
     global g_expand
     urldict = urlparse.parse_qs(urlparse.urlparse(strurl).query)
     if urldict.has_key('expand'):
-        print urldict['expand']
         for expand in urldict['expand']:
             g_expand = expand
             url_dict['expand'] = expand
@@ -411,25 +440,38 @@ def parse_url(strurl):
             for l_twho in urldict['who']:
                 g_topsql_who = l_twho
                 url_dict['t_who'] = l_twho
-        print 'top sqls: sql num: %s, history: %s,topwho:%s' % (g_topsql, g_duration,g_topsql_who)
         print is_top10_sqls.group()
     else:
         print 'no top sql'
 
     if is_sys_info:
         global g_sysinfo
+        url_dict['s_who'] = 'false'
         for sys_info in urldict['sysinfo']:
             g_sysinfo = sys_info
             url_dict['sysinfo'] = sys_info
+        #if urldict.has_key('who'):
+         #   for l_who in urldict['who']:
+          #      url_dict['s_who'] = l_who
+
         print is_sys_info.group()
     else:
         print 'no sys info'
+
+    if is_check_info:
+        global g_checkinfo
+        for ck_info in urldict['checkinfo']:
+            g_checkinfo = ck_info
+            url_dict['checkinfo'] = ck_info
+        print is_check_info.group()
+    else:
+        print 'no check info'
 
     if is_space_usage:
         global g_hdfs
         global g_hdfs_who
         url_dict['h_who'] = 'false'
-    
+
         for l_hdfs in urldict['hdfs']:
             g_hdfs = l_hdfs
             url_dict['hdfs'] = l_hdfs
@@ -437,7 +479,6 @@ def parse_url(strurl):
             for l_who in urldict['who']:
                 g_hdfs_who = l_who
                 url_dict['h_who'] = l_who
-        print 'get hdfs args is %s,hdfs_who===%s'%( url_dict['hdfs'] ,url_dict['h_who'])
         print is_space_usage.group()
     else:
         print ('no space usage')
@@ -527,86 +568,133 @@ def get_mount():
 
 
 def make_result_single(mem_dict, cpu_dict):
-    print "enter func make_result_single"
     host_name = socket.gethostname()
-    print "host_name = %s" %(host_name)
     host_fqdn = socket.getfqdn(socket.gethostname())
     host_ip = socket.gethostbyname(host_fqdn)
-    mount_dict = get_mount();
+    host_monitor = myUtil.get_xcperf_port()
+    xcloud_pid = myUtil.get_xcloud_pid()
+    # mount_dict = get_mount()
+    result = {}
+    sysinfo = check_info.CollectSysInfo()
+    result['mount'] = sysinfo.collect_sys_disk_info_by_psutil()
+    result['host'] = host_name+":"+host_ip
+    result['monitor_port'] = host_monitor
+    result['xcloud_pid'] = xcloud_pid
+    result['monitor_status'] = "on"
+    result['cpu'] = cpu_dict 
+    result['memory'] = mem_dict
+    result = json.dumps(result)
+    return result
+    mount_dict = check_info.get_sys_disk_info()
+    mount_dict = json.dumps(mount_dict)
     result = '{' \
-             '"host":"%s:%s",' \
+            '"host":"%s:%s",' \
+            '"monitor_port":"%s",' \
+            '"xcloud_pid":"%s",' \
              '"monitor_status":"on",' \
              '"cpu":{"cores":"%d","xcloud_cpu":"%s","cpuUsed":%s},' \
              '"memory":{"MemTotal":"%d","MemFree":"%d","MemXcloud":"%s"' \
              '},' \
              '%s' \
              '}' % \
-             (host_name, host_ip,
+             (host_name, host_ip,host_monitor,xcloud_pid,
               cpu_dict[g_cpuCore], cpu_dict[g_cpuXcloud], cpu_dict[g_cpuUsed],
               mem_dict[g_memtotal], mem_dict[g_memfree], mem_dict[g_memxcloud],mount_dict)
-    print result
     return result
 
-def make_topsql_result_total(results, expand, topsql):
-    print 'enter func make_topsql_result_total'
-    print 'before do anything : %s' % str(results)
-    print 'end before do anything'
+def make_topsql_result_total2(results, expand, topsql):
     len_raw = len(results)
     print "len_raw===",len_raw
     if 0 == len_raw:
         return ''
     results.sort(lambda a,b:int(b['runTime'])-int(a['runTime']))   # 降序
-    print "after sort result===%s" %str(results)
-    #if g_expand == 'true':
+
     if expand == 'true':
         rank = 1
         for result in results:
-            result['rank'] = rank
-            result['runTime'] = str(result['runTime']) + 'ms'
+            result["rank"] = str(rank)   # harvey
+            result["runTime"] = str(result["runTime"]) + 'ms'
             rank += 1
-    #if len_raw < int(g_topsql):
+
     if len_raw < int (topsql):
         len_results = len_raw
     else:
-        #len_results = int(g_topsql)
         len_results = int(topsql)
-    print 'len_results: %d' % len_results
+
     results = results[0:len_results]
-    index = 0
-    result_total = ''
-    #if g_mutex_lock.acquire():
-    #if g_expand == 'true':
+    result_total = {}                # harvey
+    result_total["SQLS"] = results   # harvey
+    return json.dumps(result_total)  # harvey
+    """
     if expand == 'true':
         result_total += '{"SQLS":['
-
         for result in results:
-            # print result
-            #result_total += str(result)
             result_total += json.dumps(result)
             index = index + 1
-            # print 'compare index : %i , len_results : %i' % (index, len_results)
             if (index != len_results):
                 result_total += ','
         result_total+=']}'
-
     else:
         print 'get top sqls'
         for result in results:
-            #result_total += str(result)
             result_total += json.dumps(result)
             index = index + 1
-            # print 'compare index : %i , len_results : %i' % (index, len_results)
             if (index != len_results):
                 result_total += '|'
     return result_total
+    """
+def make_topsql_result_total(results, expand, topsql):
+    result_total = {}   # harvey
+    print 'enter func make_topsql_result_total'
+    len_raw = len(results)
+    print "len_raw===",len_raw
+    if 0 == len_raw:
+        return ''
+    if expand == 'false':
+        print "huancun sql ziji...",results
+        len_raw = len(results)
+        if len_raw < int(topsql):
+            len_results = len_raw
+        else:
+            len_results = int(topsql)
+
+        results = results[0:len_results]
+        result_total["SQLS"] = results   # harvey
+        return json.dumps(result_total)  # harvey
+    else:
+        print "huizong sql....",results
+        rank = 1
+        results.sort(lambda a,b:int(b['runTime'])-int(a['runTime']))
+        for result in results:
+            result['rank'] = str(rank)     # harvey
+            result['runTime'] = str(result['runTime']) + 'ms'
+            rank += 1
+        len_raw = len(results)
+        if len_raw < int(topsql):
+            len_results = len_raw
+        else:
+            len_results = int(topsql)
+        results = results[0:len_results]
+        result_total["SQLS"] = results   # harvey
+        return json.dumps(result_total)  # harvey
+        """
+        result_total += '{"SQLS":['
+        for result in results:
+            print "expand=true, result==",result
+            result_total += json.dumps(result)
+            index = index + 1
+            if (index < len_results):
+                result_total += ','
+            else:
+                break
+
+        result_total+=']}'
+        return result_total
+        """
 
 def make_sysinfo_result_total(results, expand):
-    print 'enter func make_sysinfo_result_total'
-    print 'before do anything : %s' % str(results)
-    print 'end before do anything'
 
     len_results = len(results)
-    print 'len_results: %d' % len_results
 
     index = 0
     result_total = ''
@@ -627,6 +715,29 @@ def make_sysinfo_result_total(results, expand):
             result_total += str(result)
     return result_total
 
+def make_checkinfo_result_total(results, expand):
+
+    len_results = len(results)
+
+    index = 0
+    result_total = ''
+    if expand == 'true':
+        result_total += '{"CHECKS":['
+        for result in results:
+            # print result
+            result_total += str(result)
+            index = index + 1
+            # print 'compare index : %i , len_results : %i' % (index, len_results)
+            if (index != len_results):
+                result_total += ','
+        result_total+=']}'
+
+    else:
+        for result in results:
+            print 'get check info'
+            result_total += str(result)
+    return result_total
+
 title_regex = r"^\w\d{4} \d\d:\d\d:\d\d\.\d{6}.+logging\.h:88\]"   # S0217 23:18:45.558907  9105 logging.h:88]
 queryId_regex = r" query_id\[.+:?.+:?.+:0\]"   #  query_id[3e0c10ac:58a71453:848:0]
 inflight_regex = r", is_inflight\[\b(true|false)\b\]"    # , is_inflight[true]
@@ -640,182 +751,66 @@ runTime_regex = r", run_time\[\d+\(ms\)\]"    # , run_time[2283(ms)]
 end_regex = r"\. Query Used Time Total \[[\w.]+\]\. ?\b(success|failed)\b\.\(code=\d+\..+$"   # . Query Used Time Total [2s304ms].success.(code=9.)
 standard_regex = title_regex + stmt_regex + startTime_regex + stopTime_regex + runTime_regex + end_regex
 
-class ParserSQL():
-    def __init__(self, dirPath, rectime, topN):
-        self._dir   = dirPath
-        self._fileList = []
-        self._time  = rectime
-        self._stopTime = datetime.datetime.now()
-        self._startTime = datetime.datetime.now()
-        self._count = topN
-        self._sqls  = []   # add dict sql, count+1
+def get_default_sql():
+    res = '{'\
+          '"SQLS":'\
+          '{'\
+          '"host":""'\
+          ','\
+          '"minitor_port":""' \
+          ',' \
+          '"xcloud_pid":""' \
+          ',' \
+          '"stopTime":""'\
+          ','\
+          '"queryID":""'\
+          ','\
+          '"startTime":""'\
+          ','\
+          '"sql":""'\
+          ','\
+          '"usedTime":""'\
+          ','\
+          '"runTime":""'\
+          ','\
+          '"rank":""'\
+          '}'\
+          '}'
+    return res
 
-    def initReCompile(self):
-        self.standard_pattern = re.compile(standard_regex)
-        self.queryId_pattern  = re.compile(queryId_regex)
-        self.stmt_pattern     = re.compile(stmt_regex)
-        self.startTime_pattern= re.compile(startTime_regex)
-        self.stopTime_pattern = re.compile(stopTime_regex)
-        self.usedTime_pattern = re.compile(end_regex)
-        self.runTime_pattern  = re.compile(runTime_regex)
+def get_datas_from_nodes(node, history, topsql, sysinfo, checkinfo, monitor_port, result_list, mutex_lock):
+#    node = dict_args["node"]
+#    monitor_port = dict_args["monitor_port"]
+#    history = dict_args["history"]
+#    topsql = dict_args["topsql"]
+#    sysinfo = dict_args["sysinfo"]
+#    checkinfo = dict_args["checkinfo"]
+#
+    print "start threads"
+    str_result = ''
+    str_result = get_info_remote(node, history, topsql, sysinfo, checkinfo, monitor_port)
+    try:
+        if mutex_lock.acquire():
+            if sysinfo == '1':
+                result_list.append(str_result)
+            if checkinfo == '1':
+                result_list.append(str_result)
+            if topsql != '0':
+                if '' == str_result:
+                    mutex_lock.release()
+                    return
+                dict_result = json.loads(str_result)       # harvey
+                result_list.extend(dict_result["SQLS"])    # harvey
+            mutex_lock.release()
+    except Exception as e:
+        print  "get_datas_from_nodes:except......",e
+        mutex_lock.release()
 
-
-    '''
-    Only need use this interface
-    '''
-    def parser(self):
-        self.parserDate()
-        self.findFiles()
-        print "self._fileList====",self._fileList
-        self.initReCompile()
-        self.findSql()
-        #if len(self._sqls) == self._count+1:
-         #   self._sqls = self._sqls[:-1]
-        self._sqls.sort(lambda a,b:int(b['runTime'])-int(a['runTime']))   # 降序
-        if len(self._sqls) == self._count+1:#改成先降序再取出N条sql
-            self._sqls = self._sqls[:-1]
-        name = socket.getfqdn(socket.gethostname())
-        addr = socket.gethostbyname(name)
-        rank = 1
-        for sql in self._sqls:
-            # sql['rank'] = rank
-            sql['host'] = addr
-            # sql['runTime'] = str(sql['runTime']) + 'ms'
-            rank += 1
-        #sqlsDict = {'SQLS':self._sqls}
-        #sqlsJson = json.dumps(sqlsDict)
-        print "parser return before===",self._sqls
-        return self._sqls
-
-    '''
-    compare fileList,accoring to file ctime, DSC
-    '''
-    def compareFile(self, file1, file2):
-        stat_file1 = os.stat(self._dir + "/" + file1)
-        stat_file2 = os.stat(self._dir + "/" + file2)
-        if stat_file1.st_ctime > stat_file2.st_ctime:
-            return -1
-        elif stat_file1.st_ctime < stat_file2.st_ctime:
-            return 1
-        else:
-            return 0
-
-    def parserDate(self):
-        tmpTime = '-'
-        tmpTime += self._time[:-1]
-        if self._time.find('d'):
-            self._startTime = self._startTime + datetime.timedelta(days=int(tmpTime))
-        elif self._time.find('h'):
-            self._startTime = self._startTime + datetime.timedelta(hours=int(tmpTime))
-        elif self._time.find('m'):
-            self._startTime = self._startTime + datetime.timedelta(minutes=int(tmpTime))
-        elif self._time.find('s'):
-            self._startTime = self._startTime + datetime.timedelta(seconds=int(tmpTime))
-        else:
-            pass
-
-
-    '''
-    find STMT files
-    '''
-    def findFiles(self):
-        files = []
-        iterms = os.listdir(self._dir)
-        for iterm in iterms:
-            if iterm.find("STMT_.log") > -1 and iterm.find("tar.gz") == -1:
-                files.append(iterm)
-                files.sort(self.compareFile)
-
-        for afile in files:
-            stat_afile = os.stat(self._dir + "/" + afile)
-            if datetime.datetime.fromtimestamp(stat_afile.st_ctime) > self._startTime:
-                self._fileList.append(afile)
-            else:
-                break
-
-
-    '''
-    find recently time sql
-    '''
-    def findSql(self):
-        for oneFile in self._fileList:
-            lines = []
-            with open(self._dir + "/" + oneFile) as f:
-                linet = ''
-                for line1 in f:
-                    if line1.find('\r\n') != -1:
-                        print "this line contain huiche",line1
-                        line1 = line1.replace('\r\n', ' ')
-                        linet = linet+line1
-                    else:
-                        if linet != '':
-                            linet = linet+line1
-                            print "after cut huiche ----",linet
-                            lines.append(linet)
-                            linet = ''
-                        else:
-                            lines.append(line1)
-
-                for line in lines:
-                    print "will ParserSQL....",line
-                    isCorrect = self.isCorrect(line)
-                    if isCorrect:
-                        print "ParserSQL line is ......",line
-                        curTimeMatch = self.stopTime_pattern.search(line)
-                        curTime = curTimeMatch.group()     # ', stop_time[Fri Feb 17 22:03:58 2017]'
-                        curTime = curTime[12:-1]
-                        curTime = datetime.datetime.strptime(curTime, '%a %b %d %H:%M:%S %Y')
-                        if self._startTime < curTime and curTime < self._stopTime:
-                            self.addCmpSQL(line)
-                        else:
-                            continue
-                    else:
-                        continue
-            del lines[:]
-
-    def isCorrect(self, srcStr):
-        if self.standard_pattern.search(srcStr) is not None:
-            return True
-        else:
-            return False
-
-    '''
-    add sql to self._sqls,  and compare
-    '''
-    def addCmpSQL(self, srcStr):
-        runTime = self.runTime_pattern.search(srcStr).group()[11:-5]
-        queryId = self.queryId_pattern.search(srcStr).group()[10:-1]
-        startTime = self.startTime_pattern.search(srcStr).group()[13:-1]
-        stopTime  = self.stopTime_pattern.search(srcStr).group()[12:-1]
-        # Mon Jul  3 17:39:58 2017  ==> 2017-07-03 18:05:06  ; str=>ptime=>str
-        tmpStartTime = time.strptime(startTime,'%a %b %d %H:%M:%S %Y')
-        tmpStopTime = time.strptime(stopTime,'%a %b %d %H:%M:%S %Y')
-        startTime = time.strftime('%Y-%m-%d %H:%M:%S', tmpStartTime)
-        stopTime = time.strftime('%Y-%m-%d %H:%M:%S', tmpStopTime)
-
-        usedTime  = self.usedTime_pattern.search(srcStr).group()
-        usedTime  = usedTime.split(']')[0][25:]
-        stmt      = self.stmt_pattern.search(srcStr).group()
-        stmt      = stmt.split(', stmt[')[1].split('], is_inflight[')[0]
-        sqlDict = {'queryID':queryId, 'startTime':startTime, 'stopTime':stopTime, 'usedTime':usedTime, 'runTime':runTime, 'sql':stmt, 'host':"", 'rank':0}
-        print "-------",sqlDict,"------"
-        if len(self._sqls) < self._count+1:  # _sqls存放count+1个元素,+1元素用于存放新的元素，以便排序
-            self._sqls.append(sqlDict)    # 此时len(_sqls) = _count+1
-        else:
-            self._sqls[self._count] = sqlDict    # count+1 是最小的runTime
-            self._sqls.sort(lambda a,b:int(b['runTime'])-int(a['runTime']))   # 降序
-
-
-# DIR = "/home/zhanghaoyu/xpkg_bingfa/xpkg/log"
-# DIR = "/home/zhanghaoyu/python"
-# DIR = "."
-# testParser = ParserSQL(DIR, '60d', 10)
-# res = testParser.parser()
-# Create custom HTTPRequestHandler class
 class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
     # handle GET command
     def do_GET(self):
         global g_sysinfo
+        global g_checkinfo
         global g_topsql
         global g_expand
         global g_hdfs
@@ -823,14 +818,15 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
         global g_topsql_who
         global g_topsql_info
         global g_hdfs_info
-        global g_mutex_lock
+        global g_sys_info
         g_hdfs_who = 'false'
         g_topsql_who = 'false'
         g_hdfs = '0'
         g_sysinfo = '0'
+        g_checkinfo = '0'
         g_topsql = '0'
         g_expand = 'false'
-        g_topsql_who = 'false' 
+        g_topsql_who = 'false'
         g_hdfs_who = 'false'
 
         l_expand = ''
@@ -838,8 +834,10 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
         l_topsql = '0'
         l_twho = ''
         l_hwho = ''
+        l_swho = ''
         l_history = ''
         l_sysinfo = ''
+        l_checkinfo = ''
         l_dbName = ''
         l_userName = ''
         if self.path.endswith("/favicon.ico"):
@@ -863,8 +861,12 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                     l_twho = urldict['t_who']
                 elif key == 'h_who':
                     l_hwho = urldict['h_who']
+                elif key == 's_who':
+                    l_swho = urldict['s_who']
                 elif key == 'sysinfo':
                     l_sysinfo = urldict['sysinfo']
+                elif key == 'checkinfo':
+                    l_checkinfo = urldict['checkinfo']
                 elif key == 'history':
                     l_history = urldict['history']
                 elif key == 'dbName':
@@ -885,143 +887,96 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
             cpudict = dict(cpulist)
 
             result_list = []
-            pid = get_xcloud_pid()
-            print 'xcloud is running at pid: %d' % pid
-            
-            if l_sysinfo == '1':
+            pid = myUtil.get_xcloud_pid()
+
+            if l_sysinfo == '1' and  l_expand == 'false':
                 collect_sys_cpu_mem_info(memdict, cpudict, pid)
                 result = make_result_single(memdict, cpudict)
                 result_list.append(result)
 
-            #if g_topsql != '0':
+            if l_checkinfo == '1' and  l_expand == 'false':
+                result = check_info.collect_sys_check_info()
+                result_json = json.dumps(result)
+                result_list.append(result_json)
+
             if l_topsql != '0':
-                if l_twho == 'false':
-                    while 1:
-                        print "i 'm g_topsql  who =false"
-                        #if g_mutex_lock.acquire():
-                        if g_topsql_info != '':
-                            print "g_topsql_info==============",g_topsql_info
-                            self.wfile.write(g_topsql_info)
-                             #   g_mutex_lock.release()
-                            return
-                            #g_mutex_lock.release()
-
-                dir = '../log'
-                #print 'new ParserSQL(%s, %s, %d)' % (dir, g_duration, int(g_topsql))
-                print 'new ParserSQL(%s, %s, %d)' % (dir, l_history, int(l_topsql))
-                #topSqlParser = ParserSQL('../log', g_duration, int(g_topsql))
-                topSqlParser = ParserSQL('../log', l_history, int(l_topsql))
-                print "topSqlParser==============",topSqlParser
-                sql_res = topSqlParser.parser()
-                print "sql_res:"
-                print sql_res
-                result_list.extend(sql_res)
-                print "result_list=========",result_list
-                # for res in sql_res:
-                    # result_list.append(res)
-
-            #if g_expand == 'true':
-            if l_expand == 'true':
-                addr, port = get_zookerper_ip_and_port()
-                print addr
-                print port
-                # print 'get zookeeper ip, port from ds.xml: %s : %s' % addr, port
-                if addr == None or port == None:
-                    print "getZK port and ip error from  ds.xml"
+                if l_twho == 'false' and l_expand == 'false':
+                    print "i 'm g_topsql  who =false expand=false"
+                    self.wfile.write(g_topsql_info)
                     return
-                print 'fetch active xclouds from zookeeper:'
-                active_nodes = get_active_xclouds_from_zookeeer_kazoo(addr, port)
-                print active_nodes
+
+                if l_twho == 'true' and l_expand == 'false':
+                    dir = '../log'
+                    sql_res = []
+                    parsersql = parserSQL.ParserSQL(dir, myUtil.get_xcperf_port(), myUtil.get_xcloud_pid(),l_history,
+                            int(l_topsql))
+                    sql_res = parsersql.parser()
+                    result_list.extend(sql_res)
+            if l_expand == 'true':
+                servers = get_zookerper_ip_and_port()
+         
+                if servers == None:
+                    print "getZKserver err"
+                    return
 
                 host_name = socket.gethostname()   # eg.  host_name:xcloud9
                 host_fqdn = socket.getfqdn(socket.gethostname())
                 host_ip = socket.gethostbyname(host_fqdn)
-                print "result_list===",result_list
-                print 'host_name: %s:%s' % (host_name, host_ip)
-                zk = KazooClient(hosts='%s:%s' % (addr, port))
-                if not zk.connected:
-                    zk.start()
-                zk_node = get_zknode()
+                count = 1 
+                node_monitorport, count = get_active_xcloudinfo_from_zookeer(servers, l_topsql)
+                #pool = threadpool.ThreadPool(count)
+                #dict_vars = {'node_monitorport':node_monitorport, 'l_history':l_history, 'l_topsql':l_topsql, 'l_sysinfo':l_sysinfo, 'l_checkinfo':l_checkinfo,'result_list':result_list}
+                #func_var = [(None, dict_vars)]
+                #requests = threadpool.makeRequests(get_datas_from_nodes, func_var) 
+                #[pool.putRequest(req) for req in requests]
+                #pool.wait()
+                l_threads = []
+                l_mutex_lock = threading.Lock()
+                #dict_args =collections.OrderedDict()
+                #dict_args["history"] = l_history
+                #dict_args["topsql"] = l_topsql
+                #dict_args["sysinfo"] = l_sysinfo
+                #dict_args["checkinfo"] = l_checkinfo
+                for node in node_monitorport:
+                    #get_datas_from_nodes(node, monitor_port,history, topsql, sysinfo, checkinfo
+                    #dict_args["node"] = node
+                    #dict_args["monitor_port"] = node_monitorport[node]
+                    t_monitor_port = node_monitorport[node]
+                    if node.find('_') != -1:
+                        node = node.split('_')[0]
+                    t = threading.Thread(target=get_datas_from_nodes,args=(node, l_history, l_topsql, l_sysinfo, l_checkinfo,
+                        t_monitor_port,result_list,l_mutex_lock))
+                    t.start()
+                    l_threads.append(t)
+                for t in l_threads:
+                    t.join()
+                    print "wait children of threads over"
 
-                for node in active_nodes:
-                    if zk.connected:
-                        print "zk connected success"
-                    child_dir = zk_node+'/'+node
-                    datas = zk.get(child_dir)
-                    print "monitoring_port======",datas
-                    monitor_port = 0
-                    for data in datas:
-                        print "get monitor_port by split data",data
-                        try:
-                            d = json.loads(data)
-                            print "dddddddd",d
-                            monitor_port = d.get("monitor_port")
-                            print "get monitor_port from zk===",monitor_port
-                            if monitor_port != 0:
-                                break
-                        except Exception:
-                            continue
-
-                    print "node_split_before====",node    #eg.  node: xcloud9_17389   
-                    if node.find('_') != -1: 
-                        s_node = node.split('_')
-                        node = s_node[0]
-                        print "node_split_after===", node  #eg.  node:xcloud9
-                    if None == monitor_port or 0 == monitor_port:
-                        #continue
-                        if node == host_name:
-                            continue
-                        else:
-                            str_result = get_info_remote(node, l_history, l_sysinfo, l_topsql)
-                            print "str_result ==== ",str_result
-                            if l_sysinfo == '1':
-                                result_list.append(str_result)
-                            if l_topsql != '0':
-                                if '' == str_result:
-                                    continue
-                                for result in str_result.split('|'):
-                                    result_list.append(eval(result))
-                    else:
-                        if get_xcperf_port() == monitor_port and node == host_name:
-                            continue
-                        if l_sysinfo == '1' and node == host_name:
-                            continue
-                        str_result = ''
-                        if monitor_port == None or 0 == monitor_port:
-                            str_result = get_info_remote(node, l_history, l_sysinfo, l_topsql)
-                        else:
-                            str_result = get_info_remote(node, l_history, l_topsql, l_sysinfo, monitor_port)
-                        print "str_result ==== ",str_result
-                        #if g_sysinfo == '1':
-                        if l_sysinfo == '1':
-                            result_list.append(str_result)
-                        #if g_topsql != '0':
-                        if l_topsql != '0':
-                            if '' == str_result:
-                                continue
-                            for result in str_result.split('|'):
-                                result_list.append(eval(result))
-                zk.stop()
-            #if g_sysinfo == '1':
             if l_sysinfo == '1':
+                #if l_expand == 'true':
+                 #   result_list.append(g_sys_info)
                 data = make_sysinfo_result_total(result_list, l_expand)
-                print "sysinfo======",data
                 print "sysinfo===1"
                 self.wfile.write(data)
+            if l_checkinfo == '1':
+                data = make_checkinfo_result_total(result_list, l_expand)
+                print "checkinfo===1"
+                self.wfile.write(data)
 
-            #if g_topsql != '0':
             if l_topsql != '0':
-                print "result_list==",result_list
                 data = make_topsql_result_total(result_list, l_expand, l_topsql)
-                print "data_topsql==========",data
-                if data == '':
-                    #if g_expand == 'true':
+                result_list = []
+                if data == '{"SQLS":[]}' or data == '':
                     if l_expand == 'true':
                         data = '{'\
                                 '"SQLS":'\
                                 '{'\
                                 '"host":""'\
                                 ','\
+                                '"monitor_port":""' \
+                                ',' \
+                                '"xcloud_pid":""' \
+                                ',' \
                                 '"stopTime":""'\
                                 ','\
                                 '"queryID":""'\
@@ -1038,26 +993,22 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                                 '}'\
                                 '}'
                 self.wfile.write(data)
+                print "expand===",l_expand,"and who ====",l_twho
                 return
 
             if l_hdfs == '1':
                 if 'false' == l_hwho:
                     print "l_hwho===",l_hwho
                     while 1:
-                        #if g_mutex_lock.acquire():
-                        print " g_hdfs_info=====",g_hdfs_info
+                        sleep (1)
                         if g_hdfs_info != '':
                             self.wfile.write(g_hdfs_info)
-                           # g_mutex_lock.release()
                             return
-                       # g_mutex_lock.release()
-                print "l_hwho===",l_hwho
                 data = None
                 spaceUsage = space_admin.SpaceUsage()
                 ret, res = spaceUsage.get_xcloud_info_from_dhfs()
                 if ret == -1:
                     data = res
-                    print "hdfs return -1, res===",res
                     data = '{'\
                             '"xcloud_hdfs_info":'\
                             '{'\
@@ -1080,10 +1031,8 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                             ','\
                             '"xcloud":""'\
                             '}'
-                else:
                     #for r in res:
-                    data = json.dumps(res)
-                print data
+                data = json.dumps(res)
                 self.wfile.write(data)
             if l_dbName != '' and l_userName != '':
                 data = None
@@ -1093,7 +1042,6 @@ class KodeFunHTTPRequestHandler (BaseHTTPRequestHandler):
                     data = res
                 else:
                     data = json.dumps(res)
-                print "old_hdfs===",data
                 self.wfile.write(data)
 
             return
@@ -1111,7 +1059,7 @@ def run():
     # by default http server port is 80
     host_fqdn = socket.getfqdn(socket.gethostname())
     host_ip = socket.gethostbyname(host_fqdn)
-    port = get_xcperf_port()
+    port = myUtil.get_xcperf_port()
     server_address = (host_ip, port)
     #httpd = HTTPServer(server_address, KodeFunHTTPRequestHandler)
     httpd = ThreadedHTTPServer(server_address, KodeFunHTTPRequestHandler)
@@ -1121,14 +1069,28 @@ def run():
     httpd.serve_forever()
     print "the end of  server_forver "
 
+def requestsysinfo(request):
+    global g_sys_info
+    print "request====",request
+    host_fqdn = socket.getfqdn(socket.gethostname())
+    port = myUtil.get_xcperf_port()
+    thread = threading.current_thread()
+    print "sysinfo threading_ID====",thread.getName()
+    sleep(5)
+    while 1:
+        conn = httplib.HTTPConnection(host_fqdn, port)
+        conn.request('GET', 'index.html?sysinfo=1&expand=false&who=true')
+        rsp = conn.getresponse()
+        g_sys_info = rsp.read()
+        print "g_sysinfo===", g_sys_info
+        sleep(5)
 
 def requesthdfs(request):
     global g_hdfs_requested
     global g_hdfs_info
-    global g_mutex_lock
     print "request====",request
     host_fqdn = socket.getfqdn(socket.gethostname())
-    port = get_xcperf_port()
+    port = myUtil.get_xcperf_port()
     thread = threading.current_thread()
     print "hdfs threading_ID====",thread.getName()
 
@@ -1139,46 +1101,70 @@ def requesthdfs(request):
         rsp = conn.getresponse()
         g_hdfs_info = rsp.read()
 
-        print "g_hdfs_info =====",g_hdfs_info
-        sleep(7200)
+        sleep(300)
 
 def requesttopsql(request):
     global g_topsql_requested
     global g_topsql_info
-    global g_mutex_lock
     print "request====",request
     host_fqdn = socket.getfqdn(socket.gethostname())
-    port = get_xcperf_port()
+    port = myUtil.get_xcperf_port()
     thread = threading.current_thread()
     print "topN threading_ID=====",thread.getName()
-
-    sleep(10)
+    sleep(5)
     while 1:
-        conn = httplib.HTTPConnection(host_fqdn, port) 
-        url = 'index.html?top=10&history=24h&who=true&expand=true'
+        redirectpfmonlog()
+        conn = httplib.HTTPConnection(host_fqdn, port)
+        url = 'index.html?top=10&history=24h&who=true&expand=false'
         conn.request('GET', url)
         rsp = conn.getresponse()
         g_topsql_info = rsp.read()
-
         print "g_topsql_info===",g_topsql_info
-        sleep(600)
-        redirectpfmonlog()
+        sleep(6)
 
 def redirectpfmonlog():
     filePath = '../log/pfmon.log'
     if os.path.exists(filePath):
-	    if os.path.getsize(filePath)/1024/1024 > 1000:
-	        os.system('>../log/pfmon.log')
+        if os.path.getsize(filePath)/1024/1024 > 20:
+	    os.system('>../log/pfmon.log')
+
+def is_succeeded_xcloudd():
+    while 1:
+        redirectpfmonlog()
+        sleep (5)
+        pid_file = './pid'
+        dir_struc = './dir_struc'
+        if os.path.exists(pid_file):
+            count = 1
+            p = subprocess.Popen("ps -ef | grep `cat ./pid`|grep -v 'grep' |wc -l",shell=True,stdout=subprocess.PIPE)
+            out = p.stdout.readlines()
+            for line in out:
+                count = line.strip()
+            if int(count) == 0:
+                if os.path.exists(dir_struc):
+                    os.remove(dir_struc)
+                subprocess.Popen("kill -9 `cat ./pid_mon`",shell=True,stdout=subprocess.PIPE)
+                #if os.path.exists(pid_mon_file):
+
+                 #os.remove(pid_mon_file)
+        else:
+            if os.path.exists(dir_struc):
+                os.remove(dir_struc)
+            subprocess.Popen("kill  -9 `cat ./pid_mon`",shell=True,stdout=subprocess.PIPE)
+            #if os.path.exists(pid_mon_file):
+             #   os.remove(pid_mon_file)
+
+
 
 if __name__ == '__main__':
     threads = []
-    #t1 = threading.Thread(target=run)
-    #threads.append(t1)
+    t1 = threading.Thread(target=is_succeeded_xcloudd)
+    threads.append(t1)
     t2 = threading.Thread(target=requesthdfs,args={'requesthd',})
     threads.append(t2)
-    t3 = threading.Thread(target=requesttopsql,args={'requesttopsql',})
-    threads.append(t3)
-    #t4 = threading.Thread(target=redirectpfmonlog)
+    #t3 = threading.Thread(target=requesttopsql,args={'requesttopsql',})
+    #threads.append(t3)
+    #t4 = threading.Thread(target=requestsysinfo,args={'requestsysinfo',})
     #threads.append(t4)
 
     for t in threads:

@@ -1,7 +1,0 @@
-File opened at: 2018/05/03 15:37:52
-Built with gc go1.9.3 for darwin/amd64
-[W 2018/05/03 15:37:52.355 configtools.go:226] ----------Disable.DisEthereum-----------------
-File opened at: 2018/05/03 15:40:18
-Built with gc go1.9.3 for darwin/amd64
-File opened at: 2018/05/03 15:48:20
-Built with gc go1.9.3 for darwin/amd64
